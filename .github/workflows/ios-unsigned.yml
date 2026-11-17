@@ -1,6 +1,6 @@
 name: Build unsigned IPA
 
-# 产出未签名 IPA（Payload/Minis.app）。
+# 产出未签名 IPA（Payload/Minis.app），构建成功后以 Release 资产发布（不打 artifact）。
 # 装到设备需要自己重签：ldid（越狱）/ AltStore / Sideloadly / 付费开发者证书。
 # 注意：本 App 使用 App Group（group.com.openminis.app）、Share Extension、
 # FileProvider Extension，免费 Apple ID 的自动签名不支持 App Groups，
@@ -22,6 +22,9 @@ jobs:
     # 改成 macos-15 并在下面的 "Select Xcode" 步骤里安装/指定 Xcode 26.2。
     runs-on: macos-26
     timeout-minutes: 180
+    # 构建成功后创建 Release 并上传 IPA，需要写 contents 权限。
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout (with submodules)
@@ -123,12 +126,16 @@ jobs:
           ls -lh Minis-unsigned.ipa
           shasum -a 256 Minis-unsigned.ipa | tee Minis-unsigned.ipa.sha256
 
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: Minis-unsigned-ipa
-          path: |
-            out/Minis-unsigned.ipa
-            out/Minis-unsigned.ipa.sha256
-          if-no-files-found: error
-          retention-days: 7
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" \
+            out/Minis-unsigned.ipa \
+            out/Minis-unsigned.ipa.sha256 \
+            --title "Minis unsigned build #${GITHUB_RUN_NUMBER}" \
+            --notes "Unsigned IPA built from commit ${GITHUB_SHA} on $(date -u +%Y-%m-%dT%H:%M:%SZ). Sign it before installing (ldid / AltStore / Sideloadly) and keep the App Group entitlements." \
+            --prerelease \
+            --target "${GITHUB_SHA}"
