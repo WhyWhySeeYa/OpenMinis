@@ -18,9 +18,9 @@ concurrency:
 
 jobs:
   build:
-    # iOS 26.2 SDK 需要 Xcode 26.x。若 macos-26 标签尚不可用，
-    # 改成 macos-15 并在下面的 "Select Xcode" 步骤里安装/指定 Xcode 26.2。
-    runs-on: macos-26
+    # macos-15（arm64）镜像同样提供 iOS 26.2 SDK（Xcode 26.2/26.3），
+    # 且标准 runner 容量远好于 macos-26，避免长时间排队后被取消。
+    runs-on: macos-15
     timeout-minutes: 180
     # 构建成功后创建 Release 并上传 IPA，需要写 contents 权限。
     permissions:
