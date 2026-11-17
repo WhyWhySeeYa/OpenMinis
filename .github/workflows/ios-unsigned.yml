@@ -55,7 +55,11 @@ jobs:
         run: |
           # Homebrew 的 python 是 externally-managed（PEP 668），
           # pip install 会被拒；meson 直接走 brew，避免 --break-system-packages。
-          brew install ninja llvm libarchive pkg-config meson
+          brew install ninja llvm lld libarchive pkg-config meson
+          # Homebrew llvm 是 keg-only：它的 clang 需要能在 PATH 里找到 ld.lld，
+          # 否则 build_ish 的 VDSO 会报 "invalid linker name in argument '-fuse-ld=lld'"。
+          echo "/opt/homebrew/opt/llvm/bin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/opt/lld/bin" >> "$GITHUB_PATH"
           meson --version
 
       - name: Setup Go
