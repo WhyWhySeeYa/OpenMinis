@@ -1,0 +1,134 @@
+name: Build unsigned IPA
+
+# 产出未签名 IPA（Payload/Minis.app）。
+# 装到设备需要自己重签：ldid（越狱）/ AltStore / Sideloadly / 付费开发者证书。
+# 注意：本 App 使用 App Group（group.com.openminis.app）、Share Extension、
+# FileProvider Extension，免费 Apple ID 的自动签名不支持 App Groups，
+# 重签后共享目录/iSH 可能异常。越狱设备用 ldid + 保留 entitlements 最稳。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'build-*'
+
+concurrency:
+  group: ios-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # iOS 26.2 SDK 需要 Xcode 26.x。若 macos-26 标签尚不可用，
+    # 改成 macos-15 并在下面的 "Select Xcode" 步骤里安装/指定 Xcode 26.2。
+    runs-on: macos-26
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Select Xcode with iOS 26.2 SDK
+        run: |
+          set -e
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            dev="$app/Contents/Developer"
+            if "$dev/usr/bin/xcodebuild" -showsdks 2>/dev/null | grep -q 'iphoneos26\.2'; then
+              echo "Selecting $app"
+              sudo xcode-select -s "$app"
+              break
+            fi
+          done
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos || true
+          if ! xcodebuild -showsdks | grep -q 'iphoneos26\.2'; then
+            echo "::warning::没有找到带 iOS 26.2 SDK 的 Xcode，构建可能失败"
+          fi
+
+      - name: Install build tools
+        run: |
+          brew install ninja llvm libarchive pkg-config
+          python3 -m pip install --user meson
+          PY_VER=$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+          echo "$HOME/Library/Python/$PY_VER/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Download Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Copy build-time config templates
+        run: |
+          cp -n src/ios/Configs/ProviderCustomization.xcconfig.example \
+                src/ios/Configs/ProviderCustomization.xcconfig || true
+
+      - name: Cache native dependencies
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/lame-build
+            deps/frameworks
+            deps/libs
+            deps/include
+            deps/resources
+          key: native-deps-${{ runner.os }}-${{ hashFiles('deps/*.sh', 'deps/ish/**', 'deps/rclone-mobile/**', 'deps/ffmpeg-patch/**') }}
+
+      - name: Build native dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          ./deps/build_lame.sh
+          ./deps/build_ffmpeg.sh
+          ./deps/build_ish.sh
+          ./deps/prepare_alpine_rootfs.sh
+          ./deps/build_rclone_ios.sh
+
+      - name: Verify native artifacts
+        run: |
+          set -e
+          ls -d deps/libs deps/include deps/frameworks deps/resources
+          test -f deps/resources/alpine-rootfs.zip
+
+      - name: Build app (unsigned)
+        run: |
+          set -e
+          xcodebuild \
+            -project src/ios/Minis.xcodeproj \
+            -scheme Minis \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -e
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          echo "App bundle: $APP"
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry Minis-unsigned.ipa Payload
+          ls -lh Minis-unsigned.ipa
+          shasum -a 256 Minis-unsigned.ipa | tee Minis-unsigned.ipa.sha256
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minis-unsigned-ipa
+          path: |
+            out/Minis-unsigned.ipa
+            out/Minis-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 7

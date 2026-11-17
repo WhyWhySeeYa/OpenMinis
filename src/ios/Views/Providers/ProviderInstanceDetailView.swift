@@ -1470,6 +1470,27 @@ struct AddCustomModelSheet: View {
 
 // MARK: - Model Entry Detail Sheet
 
+/// [T-model-custom-headers-ui] One editable row in the model's Custom Headers
+/// editor. Identity is the row's own UUID, not the key text the user is still
+/// typing — otherwise every keystroke in the name field would replace the row
+/// (and drop keyboard focus).
+private struct ModelCustomHeaderRow: Identifiable, Hashable {
+    let id = UUID()
+    var key: String = ""
+    var value: String = ""
+}
+
+/// [T-model-custom-headers-ui] One-tap presets for the two client identities
+/// relays most often gate on. Applying one fills the editor with the same
+/// values the app itself uses on its native OAuth paths, so a version bump
+/// only has to touch `OpenAIProvider.codexClientVersion` / `ClaudeCLIMimicry`.
+private enum ModelHeaderPreset: String, CaseIterable, Identifiable {
+    case codex = "Codex CLI"
+    case claudeCode = "Claude Code"
+
+    var id: String { rawValue }
+}
+
 struct ModelEntryDetailSheet: View {
     let entry: ModelEntry
     @ObservedObject private var store = ProviderConfigStore.shared
@@ -1502,6 +1523,62 @@ struct ModelEntryDetailSheet: View {
         return entry.model.provider
     }
 
+    /// [T-model-custom-headers-ui] Custom headers only reach the wire for the
+    /// OpenAI-family providers: `LLMProviderFactory.applyModelOverrides()` is
+    /// wired into those builders only (openAI / openRouter / openAIResponses /
+    /// xAI / kimiCode / githubCopilot). Anthropic, Gemini and Antigravity build
+    /// their requests on separate paths, so showing the editor there would
+    /// promise something the request never carries.
+    private var supportsCustomHeaders: Bool {
+        guard let instance = store.config.instances.first(where: { $0.id == entry.providerInstanceId }) else {
+            return false
+        }
+        switch instance.providerType {
+        case .openAI, .openRouter, .openAIResponses, .xAI, .kimiCode, .githubCopilot:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// [T-model-custom-headers-ui] Fill the editor with a well-known client
+    /// identity. Existing rows are UPDATED in place (case-insensitive key
+    /// match) instead of appended twice, so tapping a preset after hand-editing
+    /// one value does not leave a duplicate key behind.
+    private func applyHeaderPreset(_ preset: ModelHeaderPreset) {
+        let pairs: [(String, String)]
+        switch preset {
+        case .codex:
+            // Same shape as OpenAIProvider's native Codex identity. The two
+            // UUID headers are the engine fingerprint Sub2API-style relays
+            // require; they only need to be present and stable per install.
+            let version = OpenAIProvider.codexClientVersion
+            pairs = [
+                ("User-Agent", "codex_cli_rs/\(version) (Ubuntu 22.4.0; x86_64) xterm-256color"),
+                ("originator", "codex_cli_rs"),
+                ("version", version),
+                ("session_id", UUID().uuidString.lowercased()),
+                ("x-codex-window-id", UUID().uuidString.lowercased()),
+                ("x-codex-installation-id", UUID().uuidString.lowercased()),
+            ]
+        case .claudeCode:
+            // Reuse the app's own Claude Code mimicry set so a CLI/SDK bump
+            // updates this preset too.
+            pairs = ClaudeCLIMimicry.headers
+                .sorted { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }
+                .map { ($0.key, $0.value) }
+        }
+        for (key, value) in pairs {
+            if let index = customHeaderRows.firstIndex(where: {
+                $0.key.caseInsensitiveCompare(key) == .orderedSame
+            }) {
+                customHeaderRows[index].value = value
+            } else {
+                customHeaderRows.append(ModelCustomHeaderRow(key: key, value: value))
+            }
+        }
+    }
+
     @State private var displayName: String = ""
     @State private var modelId: String = ""
     @State private var isHidden: Bool = false
@@ -1518,6 +1595,10 @@ struct ModelEntryDetailSheet: View {
     @State private var showQuickTest: Bool = false
     @State private var showForceThinkingAlert: Bool = false
     @State private var showResetAlert: Bool = false
+    /// [T-model-custom-headers-ui] Per-model outbound header rows. Mirrors
+    /// `entry.overrides.customHeaders` while the sheet is open; `save()`
+    /// rebuilds the dictionary from these rows.
+    @State private var customHeaderRows: [ModelCustomHeaderRow] = []
 
     var body: some View {
         NavigationStack {
@@ -1634,6 +1715,57 @@ struct ModelEntryDetailSheet: View {
                         Text(AppLocalized("Capabilities"))
                     } footer: {
                         Text(AppLocalized("Leave Context Window empty to use auto-detected value. Leave Max Output Tokens empty to follow the provider default."))
+                    }
+                }
+
+                if supportsCustomHeaders {
+                    // [T-model-custom-headers-ui] Per-model outbound headers.
+                    // The data layer already supported this
+                    // (`ModelOverrides.customHeaders` → `applyModelOverrides`),
+                    // but the only way to set it was importing a provider JSON.
+                    Section {
+                        ForEach($customHeaderRows) { $row in
+                            VStack(alignment: .leading, spacing: 3) {
+                                TextField(AppLocalized("Header-Name"), text: $row.key)
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                TextField(AppLocalized("value"), text: $row.value)
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                if LLMProviderFactory.isReservedOverrideHeader(
+                                    $row.wrappedValue.key.trimmingCharacters(in: .whitespacesAndNewlines)
+                                ) {
+                                    Label(AppLocalized("Reserved header — ignored"),
+                                          systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                        .onDelete { offsets in
+                            customHeaderRows.remove(atOffsets: offsets)
+                        }
+                        Button {
+                            customHeaderRows.append(ModelCustomHeaderRow())
+                        } label: {
+                            Label(AppLocalized("Add Header"), systemImage: "plus.circle")
+                        }
+                        Menu {
+                            ForEach(ModelHeaderPreset.allCases) { preset in
+                                Button(preset.rawValue) {
+                                    applyHeaderPreset(preset)
+                                }
+                            }
+                        } label: {
+                            Label(AppLocalized("Add Preset"), systemImage: "wand.and.stars")
+                        }
+                    } header: {
+                        Text(AppLocalized("Custom Headers"))
+                    } footer: {
+                        Text(AppLocalized("Sent with every request for this model. Reserved headers (Authorization, Content-Type, Host…) are ignored."))
                     }
                 }
 
@@ -1861,6 +1993,12 @@ struct ModelEntryDetailSheet: View {
         } else {
             maxTokensText = ""
         }
+        // [T-model-custom-headers-ui] Seed the editor from the saved map. Sorted
+        // by name so a JSON import (arbitrary dictionary order) opens in a
+        // stable order instead of reshuffling on every presentation.
+        customHeaderRows = (entry.overrides.customHeaders ?? [:])
+            .sorted { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }
+            .map { ModelCustomHeaderRow(key: $0.key, value: $0.value) }
     }
 
     private func resetToDefault() {
@@ -1872,6 +2010,7 @@ struct ModelEntryDetailSheet: View {
         displayName = base.displayName
         supportsThinking = base.supportsReasoning ?? false
         maxTokensText = ""
+        customHeaderRows = []
         if let ctx = base.contextWindow {
             contextWindowText = "\(ctx)"
         } else {
@@ -1977,6 +2116,21 @@ struct ModelEntryDetailSheet: View {
         // Filled → record it, even when equal to the current auto value. Empty → nil,
         // which is the documented way back to auto-detection.
         newOverrides.contextWindow = typedContextWindow
+
+        // [T-model-custom-headers-ui] Rebuild the header map from the rows.
+        // Empty keys/values are skipped rather than saved as "" (a header with an
+        // empty value is indistinguishable from "not set" on the wire), and
+        // reserved keys are dropped here as well as being flagged inline so a
+        // stale row can never overwrite auth or framing headers.
+        var headers: [String: String] = [:]
+        for row in customHeaderRows {
+            let key = row.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = row.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, !value.isEmpty,
+                  !LLMProviderFactory.isReservedOverrideHeader(key) else { continue }
+            headers[key] = value
+        }
+        newOverrides.customHeaders = headers.isEmpty ? nil : headers
 
         let baselineThinking = entry.model.supportsReasoning ?? false
         if supportsThinking != baselineThinking || entry.overrides.supportsReasoning != nil {
