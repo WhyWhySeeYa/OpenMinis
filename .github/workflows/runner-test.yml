@@ -1,0 +1,7 @@
+name: runner test
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: macos-15
+    steps:
+      - run: sw_vers && xcodebuild -version && xcrun --sdk iphoneos --show-sdk-version
