@@ -53,10 +53,10 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install ninja llvm libarchive pkg-config
-          python3 -m pip install --user meson
-          PY_VER=$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-          echo "$HOME/Library/Python/$PY_VER/bin" >> "$GITHUB_PATH"
+          # Homebrew 的 python 是 externally-managed（PEP 668），
+          # pip install 会被拒；meson 直接走 brew，避免 --break-system-packages。
+          brew install ninja llvm libarchive pkg-config meson
+          meson --version
 
       - name: Setup Go
         uses: actions/setup-go@v5
